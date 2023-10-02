@@ -1,20 +1,21 @@
+#include <stdio.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <string.h>
-#include <stddef.h>
-#include <windows.h>
-#include <string.h>
-#include <stdio.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include <stdlib.h>
 
-
-#define BUFFER_SIZE 4096 
+#define BUFFER_SIZE 4096
 #define SO_EOF -1
 
-typedef struct {
-    HANDLE fd; 
+typedef struct
+{
+    int fd;
     char buffer[BUFFER_SIZE];
     int buf_pos;
     int buf_end;
@@ -23,37 +24,87 @@ typedef struct {
     int error;
 } SO_FILE;
 
-SO_FILE *so_fopen(const char *pathname, const char *mode) {
-    HANDLE hFile;
-    DWORD dwDesiredAccess = 0;
-    DWORD dwCreationDisposition = 0;
-
-    if (strcmp(mode, "r") == 0) {
-        dwDesiredAccess = GENERIC_READ;
-        dwCreationDisposition = OPEN_EXISTING;
-    } else if (strcmp(mode, "w") == 0) {
-        dwDesiredAccess = GENERIC_WRITE;
-        dwCreationDisposition = CREATE_ALWAYS;
-    } else if (strcmp(mode, "a") == 0) {
-        dwDesiredAccess = GENERIC_WRITE;
-        dwCreationDisposition = OPEN_ALWAYS;
+int so_fflush(SO_FILE *stream)
+{
+    if (!stream)
+    {
+        stream->eof = 1;
+        return SO_EOF; // Invalid arg
     }
 
-    hFile = CreateFileA(pathname, dwDesiredAccess, 0, NULL, dwCreationDisposition, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
+    // exista date in buffer
+    int bytesToWrite = stream->buf_pos;
+    
+    if (bytesToWrite > 0)
+    {
+        int written = write(stream->fd, stream->buffer, bytesToWrite);
+        
+        if (written < bytesToWrite)
+        {
+            // nu au fost scrise toate date;e
+            stream->error = 1;
+            return SO_EOF;
+        }
+        stream->buf_pos = 0; // reset
+    }
+
+    return 0; // ok
+}
+
+SO_FILE *so_fopen(const char *pathname, const char *mode)
+{
+    int fd;
+    int flags = 0;
+
+    if (strcmp(mode, "r") == 0)
+    {
+        flags = O_RDONLY;
+    }
+    else if (strcmp(mode, "r+") == 0)
+    {
+        flags = O_RDWR;
+    }
+    else if (strcmp(mode, "w") == 0)
+    {
+        flags = O_WRONLY | O_CREAT | O_TRUNC;
+    }
+    else if (strcmp(mode, "w+") == 0)
+    {
+        flags = O_RDWR | O_CREAT | O_TRUNC;
+    }
+    else if (strcmp(mode, "a") == 0)
+    {
+        flags = O_WRONLY | O_CREAT | O_APPEND;
+    }
+    else if (strcmp(mode, "a+") == 0)
+    {
+        flags = O_RDWR | O_CREAT | O_APPEND;
+    }
+    else
+    {
+        return NULL;
+    }
+
+    fd = open(pathname, flags, 0777);
+    
+    if (fd == -1)
+    {
+        perror("Eroare la deschiderea fisierului");
         return NULL;
     }
 
     SO_FILE *soFile = (SO_FILE *)malloc(sizeof(SO_FILE));
-    if (!soFile) {
-        CloseHandle(hFile);
+    
+    if (!soFile)
+    {
+        close(fd);
         return NULL;
     }
 
-    soFile->fd = hFile;
+    soFile->fd = fd;
     soFile->buf_pos = 0;
     soFile->buf_end = 0;
-    strncpy_s(soFile->mode, sizeof(soFile->mode), mode, _TRUNCATE);
+    strncpy(soFile->mode, mode, sizeof(soFile->mode) - 1);
     soFile->mode[sizeof(soFile->mode) - 1] = '\0';
     soFile->eof = 0;
     soFile->error = 0;
@@ -61,48 +112,38 @@ SO_FILE *so_fopen(const char *pathname, const char *mode) {
     return soFile;
 }
 
-int so_fclose(SO_FILE *stream) {
-    if (!stream) {
-        return SO_EOF;
+int so_fclose(SO_FILE *stream)
+{
+    if (!stream)
+    {
+        return SO_EOF; // Invalid arg
     }
 
-    CloseHandle(stream->fd);
+    so_fflush(stream);
+    close(stream->fd);
     free(stream);
 
     return 0;
 }
 
-int so_fflush(SO_FILE *stream) {
-    if (!stream) {
-        stream->eof = 1;
-        return SO_EOF;
-    }
-
-    DWORD bytesToWrite = stream->buf_pos;
-    DWORD bytesWritten;
-
-    if (bytesToWrite > 0) {
-        if (!WriteFile(stream->fd, stream->buffer, bytesToWrite, &bytesWritten, NULL) || bytesWritten < bytesToWrite) {
-            stream->error = 1;
-            return SO_EOF;
-        }
-        stream->buf_pos = 0;
-    }
-
-    return 0;
-}
-
-int so_fgetc(SO_FILE *stream) {
-    if (stream->buf_pos >= stream->buf_end) {
-        DWORD bytesRead;
-
-        if (!ReadFile(stream->fd, stream->buffer, BUFFER_SIZE, &bytesRead, NULL)) {
-            stream->error = 1;
-            return SO_EOF;
-        }
-
-        if (bytesRead == 0) {
+int so_fgetc(SO_FILE *stream)
+{
+    // 1. verif buffer date
+    if (stream->buf_pos >= stream->buf_end)
+    {
+        // 2. nu, incarcam date
+        int bytesRead = read(stream->fd, stream->buffer, BUFFER_SIZE);
+        
+        if (bytesRead == 0)
+        {
+            // sf fisier
             stream->eof = 1;
+            return SO_EOF;
+        }
+        else if (bytesRead < 0)
+        {
+            // err
+            stream->error = 1;
             return SO_EOF;
         }
 
@@ -110,42 +151,47 @@ int so_fgetc(SO_FILE *stream) {
         stream->buf_end = bytesRead;
     }
 
-    return (unsigned char) stream->buffer[stream->buf_pos++];
+    return (unsigned char)stream->buffer[stream->buf_pos++];
 }
 
-int so_fputc(int c, SO_FILE *stream) {
-    if (!stream) {
+int so_fputc(int c, SO_FILE *stream)
+{
+    if (!stream)
+    {
         return SO_EOF;
     }
 
     stream->buffer[stream->buf_pos++] = (char)c;
 
-    if (stream->buf_pos >= BUFFER_SIZE) {
-        DWORD bytesWritten;
+    if (stream->buf_pos >= BUFFER_SIZE)
+    {
+        int bytesWritten = write(stream->fd, stream->buffer, BUFFER_SIZE);
         
-        if (!WriteFile(stream->fd, stream->buffer, BUFFER_SIZE, &bytesWritten, NULL) || bytesWritten != BUFFER_SIZE) {
+        if (bytesWritten != BUFFER_SIZE)
+        {
             stream->error = 1;
             return SO_EOF;
         }
-        
-        stream->buf_pos = 0;
+        stream->buf_pos = 0; // reset
     }
-
-    return (unsigned char) c;
+    return (unsigned char)c;
 }
 
-size_t so_fread(void *ptr, size_t size, size_t nmemb, SO_FILE *stream) {
+size_t so_fread(void *ptr, size_t size, size_t nmemb, SO_FILE *stream)
+{
     char *char_ptr = (char *)ptr;
     size_t totalBytesToRead = size * nmemb;
-    DWORD bytesRead = 0;
+    size_t bytesRead = 0;
 
-    for (size_t i = 0; i < totalBytesToRead; i++) {
+    for (size_t i = 0; i < totalBytesToRead; i++)
+    {
         int ch = so_fgetc(stream);
         
-        if (ch == SO_EOF) {
+        if (ch == SO_EOF)
+        {
+            return bytesRead / size;
             break;
         }
-        
         char_ptr[i] = ch;
         bytesRead++;
     }
@@ -153,13 +199,17 @@ size_t so_fread(void *ptr, size_t size, size_t nmemb, SO_FILE *stream) {
     return bytesRead / size;
 }
 
-size_t so_fwrite(const void *ptr, size_t size, size_t nmemb, SO_FILE *stream) {
+size_t so_fwrite(const void *ptr, size_t size, size_t nmemb, SO_FILE *stream)
+{
     const char *char_ptr = (const char *)ptr;
     size_t totalBytesToWrite = size * nmemb;
-    DWORD bytesWritten = 0;
+    size_t bytesWritten = 0;
 
-    for (size_t i = 0; i < totalBytesToWrite; i++) {
-        if (so_fputc(char_ptr[i], stream) == SO_EOF) {
+    for (size_t i = 0; i < totalBytesToWrite; i++)
+    {
+        if (so_fputc(char_ptr[i], stream) == SO_EOF)
+        {
+            return bytesWritten / size;
             break;
         }
         bytesWritten++;
@@ -168,24 +218,24 @@ size_t so_fwrite(const void *ptr, size_t size, size_t nmemb, SO_FILE *stream) {
     return bytesWritten / size;
 }
 
-int so_fseek(SO_FILE *stream, long offset, int whence) {
-    DWORD dwMoveMethod;
-
-    switch (whence) {
-        case SEEK_SET:
-            dwMoveMethod = FILE_BEGIN;
-            break;
-        case SEEK_CUR:
-            dwMoveMethod = FILE_CURRENT;
-            break;
-        case SEEK_END:
-            dwMoveMethod = FILE_END;
-            break;
-        default:
-            return -1;
+int so_fseek(SO_FILE *stream, long offset, int whence)
+{
+    if (!stream)
+    {
+        stream->eof = 1;
+        return SO_EOF;
     }
 
-    if (SetFilePointer(stream->fd, offset, NULL, dwMoveMethod) == INVALID_SET_FILE_POINTER) {
+    if (stream->buf_end - stream->buf_pos > 0)
+    {
+        so_fflush(stream);
+    }
+
+    stream->buf_pos = 0;
+    stream->buf_end = 0;
+
+    if (lseek(stream->fd, offset, whence) == -1)
+    {
         stream->error = 1;
         return SO_EOF;
     }
@@ -193,118 +243,132 @@ int so_fseek(SO_FILE *stream, long offset, int whence) {
     return 0;
 }
 
-long so_ftell(SO_FILE *stream) {
-    DWORD result = SetFilePointer(stream->fd, 0, NULL, FILE_CURRENT);
+long so_ftell(SO_FILE *stream)
+{
+    if (!stream)
+    {
+        stream->eof = 1;
+        return SO_EOF;
+    }
 
-    if (result == INVALID_SET_FILE_POINTER) {
+    long position = lseek(stream->fd, 0, SEEK_CUR);
+    
+    if (position == -1)
+    {
         stream->error = 1;
         return SO_EOF;
     }
 
-    return (long)result;
+    position += (stream->buf_pos - stream->buf_end);
+
+    return position;
 }
 
-HANDLE so_fileno(SO_FILE *stream) {
-    if (!stream) {
-        return INVALID_HANDLE_VALUE;
+int so_fileno(SO_FILE *stream)
+{
+    if (!stream)
+    {
+        return -1;
     }
     return stream->fd;
 }
 
-int so_feof(SO_FILE *stream) {
-    if (!stream) {
+int so_feof(SO_FILE *stream)
+{
+    if (!stream)
+    {
         return 0;
     }
     return stream->eof;
 }
 
-int so_ferror(SO_FILE *stream) {
-    if (!stream) {
+int so_ferror(SO_FILE *stream)
+{
+    if (!stream)
+    {
         return 0;
     }
     return stream->error;
 }
 
-SO_FILE *so_popen(const char *command, const char *type) {
-    HANDLE hRead, hWrite;
-    SECURITY_ATTRIBUTES saAttr;
-    PROCESS_INFORMATION piProcInfo;
-    STARTUPINFO siStartInfo;
-    BOOL bSuccess = FALSE;
+SO_FILE *so_popen(const char *command, const char *type)
+{
+    int pfd[2];
+    pid_t pid;
 
-    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-    saAttr.bInheritHandle = TRUE;
-    saAttr.lpSecurityDescriptor = NULL;
-
-    if (!CreatePipe(&hRead, &hWrite, &saAttr, 0)) {
+    if (pipe(pfd) == -1)
+    {
         return NULL;
     }
 
-    ZeroMemory(&piProcInfo, sizeof(PROCESS_INFORMATION));
-    ZeroMemory(&siStartInfo, sizeof(STARTUPINFO));
-    siStartInfo.cb = sizeof(STARTUPINFO);
+    pid = fork();
     
-    if (strcmp(type, "r") == 0) {
-        siStartInfo.hStdOutput = hWrite;
-        siStartInfo.hStdError = hWrite;
-        siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
-    } else if (strcmp(type, "w") == 0) {
-        siStartInfo.hStdInput = hRead;
-        siStartInfo.dwFlags |= STARTF_USESTDHANDLES;
-    } else {
-        CloseHandle(hRead);
-        CloseHandle(hWrite);
+    if (pid == -1)
+    {
+        close(pfd[0]);
+        close(pfd[1]);
         return NULL;
     }
 
-    bSuccess = CreateProcess(NULL, 
-        command,
-        NULL,
-        NULL,
-        TRUE,
-        0,
-        NULL,
-        NULL,
-        &siStartInfo,
-        &piProcInfo);
+    if (pid == 0)
+    { // copil
+        if (strcmp(type, "r") == 0)
+        {
+            close(pfd[0]);
+            dup2(pfd[1], STDOUT_FILENO);
+        }
+        else if (strcmp(type, "w") == 0)
+        {
+            close(pfd[1]);
+            dup2(pfd[0], STDIN_FILENO);
+        }
 
-    if (!bSuccess) {
-        CloseHandle(hRead);
-        CloseHandle(hWrite);
-        return NULL;
-    } else {
-        CloseHandle(piProcInfo.hProcess);
-        CloseHandle(piProcInfo.hThread);
+        execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+        exit(1);
     }
 
+    // parinte
     SO_FILE *soFile = (SO_FILE *)malloc(sizeof(SO_FILE));
-    if (!soFile) {
-        CloseHandle(hRead);
-        CloseHandle(hWrite);
+    
+    if (!soFile)
+    {
+        close(pfd[0]);
+        close(pfd[1]);
         return NULL;
     }
 
-    if (strcmp(type, "r") == 0) {
-        CloseHandle(hWrite);
-        soFile->fd = hRead;
-    } else {
-        CloseHandle(hRead);
-        soFile->fd = hWrite;
+    if (strcmp(type, "r") == 0)
+    {
+        close(pfd[1]);
+        soFile->fd = pfd[0];
     }
-
+    else if (strcmp(type, "w") == 0)
+    {
+        close(pfd[0]);
+        soFile->fd = pfd[1];
+    }
     soFile->buf_pos = 0;
     soFile->buf_end = 0;
 
     return soFile;
 }
 
-int so_pclose(SO_FILE *stream) {
-    if (!stream) {
+int so_pclose(SO_FILE *stream)
+{
+    int status;
+    
+    if (!stream)
+    {
         return -1;
     }
 
-    CloseHandle(stream->fd);
+    close(stream->fd);
     free(stream);
-    return 0;
-}
 
+    if (wait(&status) == -1)
+    {
+        return -1;
+    }
+
+    return WEXITSTATUS(status);
+}
